@@ -1,200 +1,250 @@
+;;;; Recognizer.lisp
+;;;; Recursive descent parser for validating token sequences
 
+(load "Common.lisp")
 
-;;; ============================================================================
-;;; RECOGNIZER IMPLEMENTATION
-;;; ============================================================================
-
-;;; Global variables for parser state
-(defparameter *tokens* nil)        ; List of all tokens
-(defparameter *current-index* 0)   ; Current position in token list
-(defparameter *output-stream* nil) ; Output file stream for error messages
-
-;;; Get the current token
-(defun current-token ()
-  "Return the current token, or NIL if past end."
-  (if (< *current-index* (length *tokens*))
-      (nth *current-index* *tokens*)
-      nil))
-
-;;; Get the token type of current token
-(defun current-token-type ()
-  "Return the token type of the current token, or NIL."
-  (let ((tok (current-token)))
-    (if tok (lex-token-type tok) nil)))
-
-;;; Consume (advance to next token)
-(defun consume ()
-  "Move to the next token."
-  (incf *current-index*))
-
-;;; Check if current token matches expected type
-(defun match (expected-type)
-  "Return T if current token type matches expected type."
-  (eq (current-token-type) expected-type))
-
-;;; Error reporting and termination
-(defun report-error (message)
-  "Write error message to output file and exit."
-  (format *output-stream* "~A~%" message)
-  (close *output-stream*)
-  (exit :code 0))
-
-;;; Expect a specific token type
-(defun expect (token-type grammar-rule)
-  "Consume current token if it matches expected type, otherwise error."
-  (if (match token-type)
-      (consume)
-      (report-error
-       (format nil "Error: In grammar rule ~A, expected token #~A to be ~A but was ~A"
-               grammar-rule
-               (+ *current-index* 1)
-               (token-type-to-string token-type)
-               (if (current-token)
-                   (token-type-to-string (current-token-type))
-                   "EOF")))))
-
-;;; Read tokens from file
-(defun read-tokens-from-file (filepath)
-  "Read token-lexeme pairs from file and return list of lex structures."
-  (with-open-file (stream filepath :direction :input)
-    (loop for line = (read-line stream nil nil)
-          while line
-          for trimmed = (string-trim '(#\Space #\Tab) line)
-          when (> (length trimmed) 0)
-          collect (let* ((space-pos (position #\Space trimmed))
-                         (token-str (subseq trimmed 0 space-pos))
-                         (lexeme (subseq trimmed (+ space-pos 1))))
-                    (make-lex :token-type (string-to-token-type token-str)
-                              :lexeme lexeme)))))
-
-;;; Grammar rule: term --> IDENTIFIER | NUMBER
-(defun parse-term ()
-  "Parse a term non-terminal."
-  (cond
-    ((match :IDENTIFIER) (consume))
-    ((match :NUMBER) (consume))
-    (t (report-error
-        (format nil "Error: In grammar rule term, expected a valid term non-terminal to be present but was not.")))))
-
-;;; Grammar rule: expression --> term {BINOP term} | LEFT_PARENTHESIS expression RIGHT_PARENTHESIS
-(defun parse-expression ()
-  "Parse an expression non-terminal."
-  (cond
-    ;; LEFT_PARENTHESIS expression RIGHT_PARENTHESIS
-    ((match :LEFT-PARENTHESIS)
-     (consume)
-     (parse-expression)
-     (expect :RIGHT-PARENTHESIS "expression"))
-    
-    ;; term {BINOP term}
-    (t
-     (parse-term)
-     ;; Handle zero or more {BINOP term}
-     (loop while (match :BINOP)
-           do (consume)
-              (parse-term)))))
-
-;;; Grammar rule: assignment --> IDENTIFIER EQUAL expression EOL
-(defun parse-assignment ()
-  "Parse an assignment statement."
-  (expect :IDENTIFIER "assignment")
-  (expect :EQUAL "assignment")
-  (parse-expression)
-  (expect :EOL "assignment"))
-
-;;; Grammar rule: return --> RETURN_KEYWORD expression EOL
-(defun parse-return ()
-  "Parse a return statement."
-  (expect :RETURN-KEYWORD "return")
-  (parse-expression)
-  (expect :EOL "return"))
-
-;;; Grammar rule: while-loop --> WHILE_KEYWORD LEFT_PARENTHESIS expression RIGHT_PARENTHESIS body
-(defun parse-while-loop ()
-  "Parse a while loop statement."
-  (expect :WHILE-KEYWORD "while-loop")
-  (expect :LEFT-PARENTHESIS "while-loop")
-  (parse-expression)
-  (expect :RIGHT-PARENTHESIS "while-loop")
-  (parse-body))
-
-;;; Grammar rule: statement --> while-loop | return | assignment
-(defun parse-statement ()
-  "Parse a statement non-terminal."
-  (cond
-    ((match :WHILE-KEYWORD) (parse-while-loop))
-    ((match :RETURN-KEYWORD) (parse-return))
-    ((match :IDENTIFIER) (parse-assignment))
-    (t (report-error
-        (format nil "Error: In grammar rule statement, expected a valid statement non-terminal to be present but was not.")))))
-
-;;; Grammar rule: statement-list --> statement {statement}
-(defun parse-statement-list ()
-  "Parse a statement-list non-terminal."
-  (parse-statement)
-  ;; Handle zero or more additional statements
-  (loop while (or (match :WHILE-KEYWORD)
-                  (match :RETURN-KEYWORD)
-                  (match :IDENTIFIER))
-        do (parse-statement)))
-
-;;; Grammar rule: body --> LEFT_BRACKET [statement-list] RIGHT_BRACKET
-(defun parse-body ()
-  "Parse a body non-terminal."
-  (expect :LEFT-BRACKET "body")
-  ;; Optional statement-list
-  (when (or (match :WHILE-KEYWORD)
-            (match :RETURN-KEYWORD)
-            (match :IDENTIFIER))
-    (parse-statement-list))
-  (expect :RIGHT-BRACKET "body"))
-
-;;; Grammar rule: arg-decl --> VARTYPE IDENTIFIER {COMMA VARTYPE IDENTIFIER}
-(defun parse-arg-decl ()
-  "Parse an arg-decl non-terminal."
-  (expect :VARTYPE "arg-decl")
-  (expect :IDENTIFIER "arg-decl")
-  ;; Handle zero or more {COMMA VARTYPE IDENTIFIER}
-  (loop while (match :COMMA)
-        do (consume)
-           (expect :VARTYPE "arg-decl")
-           (expect :IDENTIFIER "arg-decl")))
-
-;;; Grammar rule: header --> VARTYPE IDENTIFIER LEFT_PARENTHESIS [arg-decl] RIGHT_PARENTHESIS
-(defun parse-header ()
-  "Parse a header non-terminal."
-  (expect :VARTYPE "header")
-  (expect :IDENTIFIER "header")
-  (expect :LEFT-PARENTHESIS "header")
-  ;; Optional arg-decl
-  (when (match :VARTYPE)
-    (parse-arg-decl))
-  (expect :RIGHT-PARENTHESIS "header"))
-
-;;; Grammar rule: function --> header body
-(defun parse-function ()
-  "Parse a function (top-level grammar rule)."
-  (parse-header)
-  (parse-body))
+;;; Global parser state
+(defvar *tokens* nil)           ; List of all lex structures
+(defvar *current-index* 0)      ; Index of current token being examined
+(defvar *output-stream* nil)    ; Output file stream for error messages
 
 ;;; Main recognizer function
-(defun recognize (input-file output-file)
-  "Main recognizer: read tokens, parse, write result."
+(defun recognize-file (input-file output-file)
+  "Parse tokens from input file and validate against grammar"
   (setf *tokens* (read-tokens-from-file input-file))
   (setf *current-index* 0)
   
-  (with-open-file (stream output-file :direction :output :if-exists :supersede)
+  (with-open-file (stream output-file
+                          :direction :output
+                          :if-exists :supersede
+                          :if-does-not-exist :create)
     (setf *output-stream* stream)
     
-    ;; Parse the top-level rule
+    ;; Parse starting from top-level grammar rule
     (parse-function)
     
-    ;; Check if all tokens were consumed
-    (if (< *current-index* (length *tokens*))
-        (report-error
-         (format nil "Error: Only consumed ~A of the ~A given tokens"
-                 *current-index*
-                 (length *tokens*)))
-        ;; Success!
-        (format stream "PARSED!!!~%"))))
+    ;; Check that all tokens were consumed
+    (when (< *current-index* (length *tokens*))
+      (report-error (format nil "Only consumed ~D of the ~D given tokens"
+                           *current-index*
+                           (length *tokens*))))
+    
+    ;; If we get here, parsing succeeded
+    (format stream "PARSED!!!~%")))
 
+;;; Read tokens from file generated by Tokenizer
+(defun read-tokens-from-file (filepath)
+  "Read token and lexeme pairs from file into list of lex structures"
+  (with-open-file (stream filepath :direction :input)
+    (loop for line = (read-line stream nil)
+          while line
+          collect (parse-token-line line))))
+
+;;; Parse a single line of token output (format: "TOKEN_TYPE lexeme")
+(defun parse-token-line (line)
+  "Parse a line like 'VARTYPE int' into a lex structure"
+  (let* ((space-pos (position #\Space line))
+         (token-str (subseq line 0 space-pos))
+         (lexeme (subseq line (1+ space-pos))))
+    (make-lex :token (intern (substitute #\- #\_ token-str) :keyword)
+              :lexeme lexeme)))
+
+;;; Report error and exit
+(defun report-error (message)
+  "Write error message to output file and exit"
+  (format *output-stream* "Error: ~A~%" message)
+  (force-output *output-stream*)  ; Ensure output is written before exit
+  (close *output-stream*)          ; Close the stream explicitly
+  (sb-ext:exit :code 0))
+
+;;; Get current token without consuming it (lookahead)
+(defun peek-token ()
+  "Return current token type without advancing, or NIL if at end"
+  (if (< *current-index* (length *tokens*))
+      (lex-token (nth *current-index* *tokens*))
+      nil))
+
+;;; Get current token number (1-indexed for error messages)
+(defun current-token-number ()
+  "Return current token number (1-indexed)"
+  (1+ *current-index*))
+
+;;; Consume current token if it matches expected type
+(defun match-token (expected-token rule-name)
+  "Consume token if it matches expected type, otherwise report error"
+  (let ((actual-token (peek-token)))
+    (if (eq actual-token expected-token)
+        (progn
+          (incf *current-index*)
+          t)
+        (report-error 
+         (format nil "In grammar rule ~A, expected token #~D to be ~A but was ~A"
+                 rule-name
+                 (current-token-number)
+                 (token-to-string expected-token)
+                 (if actual-token 
+                     (token-to-string actual-token)
+                     "EOF"))))))
+
+;;; Check if current token matches any in a list
+(defun token-in-list-p (token-list)
+  "Return T if current token is in the given list"
+  (member (peek-token) token-list))
+
+;;; Grammar rule: function --> header body
+(defun parse-function ()
+  "Parse a function declaration"
+  (parse-header)
+  (parse-body))
+
+;;; Grammar rule: header --> VARTYPE IDENTIFIER LEFT_PARENTHESIS [arg-decl] RIGHT_PARENTHESIS
+(defun parse-header ()
+  "Parse function header"
+  (match-token :VARTYPE "header")
+  (match-token :IDENTIFIER "header")
+  (match-token :LEFT-PARENTHESIS "header")
+  
+  ;; Optional arg-decl (starts with VARTYPE)
+  (when (eq (peek-token) :VARTYPE)
+    (parse-arg-decl))
+  
+  (match-token :RIGHT-PARENTHESIS "header"))
+
+;;; Grammar rule: arg-decl --> VARTYPE IDENTIFIER {COMMA VARTYPE IDENTIFIER}
+(defun parse-arg-decl ()
+  "Parse argument declaration list"
+  (match-token :VARTYPE "arg-decl")
+  (match-token :IDENTIFIER "arg-decl")
+  
+  ;; Zero or more additional arguments
+  (loop while (eq (peek-token) :COMMA) do
+    (match-token :COMMA "arg-decl")
+    (match-token :VARTYPE "arg-decl")
+    (match-token :IDENTIFIER "arg-decl")))
+
+;;; Grammar rule: body --> LEFT_BRACKET [statement-list] RIGHT_BRACKET
+(defun parse-body ()
+  "Parse function body"
+  (match-token :LEFT-BRACKET "body")
+  
+  ;; Optional statement-list (starts with WHILE, RETURN, or IDENTIFIER)
+  (when (token-in-list-p '(:WHILE-KEYWORD :RETURN-KEYWORD :IDENTIFIER))
+    (parse-statement-list))
+  
+  (match-token :RIGHT-BRACKET "body"))
+
+;;; Grammar rule: statement-list --> statement {statement}
+(defun parse-statement-list ()
+  "Parse list of statements"
+  (parse-statement)
+  
+  ;; Zero or more additional statements
+  (loop while (token-in-list-p '(:WHILE-KEYWORD :RETURN-KEYWORD :IDENTIFIER)) do
+    (parse-statement)))
+
+;;; Grammar rule: statement --> while-loop | return | assignment
+(defun parse-statement ()
+  "Parse a single statement"
+  (cond
+    ((eq (peek-token) :WHILE-KEYWORD)
+     (parse-while-loop))
+    
+    ((eq (peek-token) :RETURN-KEYWORD)
+     (parse-return))
+    
+    ((eq (peek-token) :IDENTIFIER)
+     (parse-assignment))
+    
+    (t
+     (report-error "In grammar rule statement, expected a valid statement to be present but was not."))))
+
+;;; Grammar rule: while-loop --> WHILE_KEYWORD LEFT_PARENTHESIS expression RIGHT_PARENTHESIS body
+(defun parse-while-loop ()
+  "Parse while loop"
+  (match-token :WHILE-KEYWORD "while-loop")
+  (match-token :LEFT-PARENTHESIS "while-loop")
+  (parse-expression)
+  (match-token :RIGHT-PARENTHESIS "while-loop")
+  (parse-body))
+
+;;; Grammar rule: return --> RETURN_KEYWORD expression EOL
+(defun parse-return ()
+  "Parse return statement"
+  (match-token :RETURN-KEYWORD "return")
+  (parse-expression)
+  (match-token :EOL "return"))
+
+;;; Grammar rule: assignment --> IDENTIFIER EQUAL expression EOL
+(defun parse-assignment ()
+  "Parse assignment statement"
+  (match-token :IDENTIFIER "assignment")
+  (match-token :EQUAL "assignment")
+  (parse-expression)
+  (match-token :EOL "assignment"))
+
+;;; Grammar rule: expression --> term {BINOP term} | LEFT_PARENTHESIS expression RIGHT_PARENTHESIS
+;;; Note: The grammar allows for parenthesized expressions OR term sequences with BINOP
+;;; A parenthesized expression is a complete expression unit
+(defun parse-expression ()
+  "Parse expression"
+  (cond
+    ;; Parenthesized expression
+    ((eq (peek-token) :LEFT-PARENTHESIS)
+     (match-token :LEFT-PARENTHESIS "expression")
+     (parse-expression)
+     (match-token :RIGHT-PARENTHESIS "expression")
+     ;; After a parenthesized expression, check for BINOP term continuations
+     (loop while (eq (peek-token) :BINOP) do
+       (match-token :BINOP "expression")
+       ;; The next part can be another term or parenthesized expression
+       (if (eq (peek-token) :LEFT-PARENTHESIS)
+           (progn
+             (match-token :LEFT-PARENTHESIS "expression")
+             (parse-expression)
+             (match-token :RIGHT-PARENTHESIS "expression"))
+           (parse-term))))
+    
+    ;; Term-based expression
+    ((token-in-list-p '(:IDENTIFIER :NUMBER))
+     (parse-term)
+     ;; Zero or more BINOP term pairs
+     (loop while (eq (peek-token) :BINOP) do
+       (match-token :BINOP "expression")
+       ;; The next part can be a term or parenthesized expression
+       (if (eq (peek-token) :LEFT-PARENTHESIS)
+           (progn
+             (match-token :LEFT-PARENTHESIS "expression")
+             (parse-expression)
+             (match-token :RIGHT-PARENTHESIS "expression"))
+           (parse-term))))
+    
+    (t
+     (report-error "In grammar rule expression, expected a valid expression to be present but was not."))))
+
+;;; Grammar rule: term --> IDENTIFIER | NUMBER
+(defun parse-term ()
+  "Parse term"
+  (cond
+    ((eq (peek-token) :IDENTIFIER)
+     (match-token :IDENTIFIER "term"))
+    
+    ((eq (peek-token) :NUMBER)
+     (match-token :NUMBER "term"))
+    
+    (t
+     (report-error "In grammar rule term, expected a valid term to be present but was not."))))
+
+;;; Entry point - parse command line arguments and run recognizer
+(defun main ()
+  "Main entry point for recognizer program"
+  (let ((args sb-ext:*posix-argv*))  ; For SBCL
+    (when (< (length args) 3)
+      (format *error-output* "Usage: ~A <input-file> <output-file>~%" (first args))
+      (sb-ext:exit :code 1))
+    
+    (let ((input-file (second args))
+          (output-file (third args)))
+      (recognize-file input-file output-file))))
+
+;;; Run main function
+(main)
