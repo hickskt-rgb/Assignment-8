@@ -1,88 +1,65 @@
+;;;; Tokenizer.lisp
+;;;; Reads input file, generates lexemes, and outputs tokens with lexemes
 
+(load "Common.lisp")
 
-;;; ============================================================================
-;;; TOKENIZER IMPLEMENTATION
-;;; ============================================================================
+;;; Main tokenizer function
+(defun tokenize-file (input-file output-file)
+  "Read input file, tokenize contents, write tokens to output file"
+  (let* ((contents (read-file-contents input-file))
+         (lexemes (generate-lexemes contents))
+         (tokens (associate-tokens lexemes)))
+    (write-tokens-to-file tokens output-file)))
 
-;;; Check if a character is whitespace
-(defun whitespace-p (ch)
-  "Return T if character is whitespace."
-  (member ch '(#\Space #\Tab #\Newline #\Return)))
-
-;;; Check if a character is alphabetic
-(defun alpha-p (ch)
-  "Return T if character is alphabetic."
-  (or (char<= #\a ch #\z)
-      (char<= #\A ch #\Z)))
-
-;;; Check if a character is numeric
-(defun digit-p (ch)
-  "Return T if character is a digit."
-  (char<= #\0 ch #\9))
-
-;;; Check if a character is alphanumeric
-(defun alnum-p (ch)
-  "Return T if character is alphanumeric."
-  (or (alpha-p ch) (digit-p ch)))
-
-;;; Check if a string contains only digits
-(defun all-digits-p (str)
-  "Return T if string contains only numeric characters."
-  (and (> (length str) 0)
-       (every #'digit-p str)))
-
-;;; Read entire file into a string
-(defun read-file-to-string (filepath)
-  "Read the entire contents of a file into a string."
+;;; Read entire file contents into a string
+(defun read-file-contents (filepath)
+  "Read all characters from file into a single string"
   (with-open-file (stream filepath :direction :input)
     (let ((contents (make-string (file-length stream))))
       (read-sequence contents stream)
       contents)))
 
-;;; Tokenize the input text into lexemes
-(defun tokenize-text (text)
-  "Convert input text into a list of lexeme strings."
+;;; Generate lexemes from input string
+(defun generate-lexemes (input)
+  "Convert input string into list of lexeme strings"
   (let ((lexemes '())
         (current-lexeme "")
-        (i 0)
-        (len (length text)))
-    
-    (loop while (< i len) do
-      (let ((ch (char text i)))
+        (i 0))
+    (loop while (< i (length input)) do
+      (let ((ch (char input i)))
         (cond
-          ;; Whitespace: end current lexeme if any
+          ;; Whitespace - end current lexeme if any
           ((whitespace-p ch)
            (when (> (length current-lexeme) 0)
              (push current-lexeme lexemes)
              (setf current-lexeme ""))
            (incf i))
           
-          ;; Alphanumeric: build alphanumeric lexeme
-          ((alnum-p ch)
-           ;; If we were building a different type, save it
-           (when (and (> (length current-lexeme) 0)
-                      (not (alnum-p (char current-lexeme 0))))
-             (push current-lexeme lexemes)
-             (setf current-lexeme ""))
+          ;; Alphanumeric character - add to current lexeme
+          ((alphanumeric-p ch)
            (setf current-lexeme (concatenate 'string current-lexeme (string ch)))
            (incf i))
           
-          ;; Symbol characters
+          ;; Symbol character - handle multi-character symbols
           (t
-           ;; End any alphanumeric lexeme
+           ;; Save current alphanumeric lexeme if any
            (when (> (length current-lexeme) 0)
              (push current-lexeme lexemes)
              (setf current-lexeme ""))
            
-           ;; Check for two-character symbols
-           (let ((two-char (if (< (+ i 1) len)
-                               (concatenate 'string (string ch) (string (char text (+ i 1))))
-                               nil)))
+           ;; Check for multi-character symbols (!=, ==)
+           (let ((two-char (if (< (+ i 1) (length input))
+                              (subseq input i (+ i 2))
+                              nil)))
              (cond
-               ;; Check for != or ==
-               ((and two-char (or (string= two-char "!=")
-                                  (string= two-char "==")))
-                (push two-char lexemes)
+               ;; Check for != operator
+               ((and two-char (string= two-char "!="))
+                (push "!=" lexemes)
+                (incf i 2))
+               
+               ;; Check for == operator
+               ((and two-char (string= two-char "=="))
+                (push "==" lexemes)
                 (incf i 2))
                
                ;; Single character symbol
@@ -94,67 +71,57 @@
     (when (> (length current-lexeme) 0)
       (push current-lexeme lexemes))
     
-    ;; Reverse because we built the list backwards
+    ;; Reverse to get correct order (we pushed in reverse)
     (nreverse lexemes)))
 
-;;; Associate a lexeme with its token type
+;;; Associate each lexeme with its token class
+(defun associate-tokens (lexemes)
+  "Convert list of lexeme strings to list of lex structures"
+  (mapcar #'classify-lexeme lexemes))
+
+;;; Classify a single lexeme to determine its token type
 (defun classify-lexeme (lexeme)
-  "Determine the token type for a given lexeme string."
-  (cond
-    ;; Single-character symbols (check in order)
-    ((string= lexeme "(") :LEFT-PARENTHESIS)
-    ((string= lexeme ")") :RIGHT-PARENTHESIS)
-    ((string= lexeme "{") :LEFT-BRACKET)
-    ((string= lexeme "}") :RIGHT-BRACKET)
+  "Determine token class for a given lexeme string"
+  (let ((token-type nil))
+    ;; Check reserved words first (in order defined in lexical structure)
+    (dolist (pair +reserved-words+)
+      (when (string= lexeme (car pair))
+        (setf token-type (cdr pair))
+        (return)))
     
-    ;; Keywords
-    ((string= lexeme "while") :WHILE-KEYWORD)
-    ((string= lexeme "return") :RETURN-KEYWORD)
+    ;; If not a reserved word, check if it's a NUMBER
+    (when (null token-type)
+      (if (all-digits-p lexeme)
+          (setf token-type :NUMBER)
+          ;; Otherwise it must be an IDENTIFIER (assuming valid input)
+          (setf token-type :IDENTIFIER)))
     
-    ;; Other single-character symbols
-    ((string= lexeme "=") :EQUAL)
-    ((string= lexeme ",") :COMMA)
-    ((string= lexeme ";") :EOL)
-    
-    ;; VARTYPE
-    ((or (string= lexeme "int") (string= lexeme "void")) :VARTYPE)
-    
-    ;; BINOP
-    ((or (string= lexeme "+")
-         (string= lexeme "*")
-         (string= lexeme "!=")
-         (string= lexeme "==")
-         (string= lexeme "%"))
-     :BINOP)
-    
-    ;; NUMBER (all digits)
-    ((all-digits-p lexeme) :NUMBER)
-    
-    ;; Default to IDENTIFIER (matches [a-zA-Z][a-zA-Z0-9]*)
-    (t :IDENTIFIER)))
+    ;; Create and return lex structure
+    (make-lex :token token-type :lexeme lexeme)))
 
-;;; Convert lexemes to lex structures
-(defun lexemes-to-lex-list (lexemes)
-  "Convert a list of lexeme strings to a list of lex structures."
-  (mapcar (lambda (lexeme)
-            (make-lex :token-type (classify-lexeme lexeme)
-                      :lexeme lexeme))
-          lexemes))
-
-;;; Write lex structures to output file
-(defun write-tokens (lex-list filepath)
-  "Write token-lexeme pairs to output file."
-  (with-open-file (stream filepath :direction :output :if-exists :supersede)
-    (dolist (lex lex-list)
-      (format stream "~A ~A~%"
-              (token-type-to-string (lex-token-type lex))
+;;; Write tokens to output file
+(defun write-tokens-to-file (tokens output-file)
+  "Write each token and lexeme pair to output file"
+  (with-open-file (stream output-file 
+                          :direction :output
+                          :if-exists :supersede
+                          :if-does-not-exist :create)
+    (dolist (lex tokens)
+      (format stream "~A ~A~%" 
+              (token-to-string (lex-token lex))
               (lex-lexeme lex)))))
 
-;;; Main tokenizer function
-(defun tokenize (input-file output-file)
-  "Main tokenizer: read input file, tokenize, write to output file."
-  (let* ((text (read-file-to-string input-file))
-         (lexemes (tokenize-text text))
-         (lex-list (lexemes-to-lex-list lexemes)))
-    (write-tokens lex-list output-file)))
+;;; Entry point - parse command line arguments and run tokenizer
+(defun main ()
+  "Main entry point for tokenizer program"
+  (let ((args sb-ext:*posix-argv*))  ; For SBCL
+    (when (< (length args) 3)
+      (format *error-output* "Usage: ~A <input-file> <output-file>~%" (first args))
+      (sb-ext:exit :code 1))
+    
+    (let ((input-file (second args))
+          (output-file (third args)))
+      (tokenize-file input-file output-file))))
 
+;;; Run main function
+(main)
