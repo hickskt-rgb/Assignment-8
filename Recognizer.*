@@ -1,0 +1,443 @@
+;;; compiler.lisp
+;;; All-in-one Common Lisp Tokenizer and Recognizer
+;;; S-Tier Language Implementation (+20 bonus points!)
+
+;;; ============================================================================
+;;; SHARED DEFINITIONS (Common)
+;;; ============================================================================
+
+;;; Token types enum (using keywords for type safety)
+(defparameter *token-types*
+  '(:LEFT-PARENTHESIS
+    :RIGHT-PARENTHESIS
+    :LEFT-BRACKET
+    :RIGHT-BRACKET
+    :WHILE-KEYWORD
+    :RETURN-KEYWORD
+    :EQUAL
+    :COMMA
+    :EOL
+    :VARTYPE
+    :IDENTIFIER
+    :BINOP
+    :NUMBER))
+
+;;; Structure to hold a lexeme and its associated token type
+(defstruct lex
+  (token-type nil :type keyword)  ; The token class
+  (lexeme "" :type string))       ; The actual text
+
+;;; Convert token type keyword to string format for output
+;;; e.g., :LEFT-PARENTHESIS -> "LEFT_PARENTHESIS"
+(defun token-type-to-string (token-type)
+  "Convert a token type keyword to its string representation with underscores."
+  (substitute #\_ #\- (symbol-name token-type)))
+
+;;; Convert string to token type keyword
+;;; e.g., "LEFT_PARENTHESIS" -> :LEFT-PARENTHESIS
+(defun string-to-token-type (str)
+  "Convert a token type string to its keyword representation."
+  (intern (substitute #\- #\_ str) :keyword))
+
+;;; ============================================================================
+;;; TOKENIZER IMPLEMENTATION
+;;; ============================================================================
+
+;;; Check if a character is whitespace
+(defun whitespace-p (ch)
+  "Return T if character is whitespace."
+  (member ch '(#\Space #\Tab #\Newline #\Return)))
+
+;;; Check if a character is alphabetic
+(defun alpha-p (ch)
+  "Return T if character is alphabetic."
+  (or (char<= #\a ch #\z)
+      (char<= #\A ch #\Z)))
+
+;;; Check if a character is numeric
+(defun digit-p (ch)
+  "Return T if character is a digit."
+  (char<= #\0 ch #\9))
+
+;;; Check if a character is alphanumeric
+(defun alnum-p (ch)
+  "Return T if character is alphanumeric."
+  (or (alpha-p ch) (digit-p ch)))
+
+;;; Check if a string contains only digits
+(defun all-digits-p (str)
+  "Return T if string contains only numeric characters."
+  (and (> (length str) 0)
+       (every #'digit-p str)))
+
+;;; Read entire file into a string
+(defun read-file-to-string (filepath)
+  "Read the entire contents of a file into a string."
+  (with-open-file (stream filepath :direction :input)
+    (let ((contents (make-string (file-length stream))))
+      (read-sequence contents stream)
+      contents)))
+
+;;; Tokenize the input text into lexemes
+(defun tokenize-text (text)
+  "Convert input text into a list of lexeme strings."
+  (let ((lexemes '())
+        (current-lexeme "")
+        (i 0)
+        (len (length text)))
+    
+    (loop while (< i len) do
+      (let ((ch (char text i)))
+        (cond
+          ;; Whitespace: end current lexeme if any
+          ((whitespace-p ch)
+           (when (> (length current-lexeme) 0)
+             (push current-lexeme lexemes)
+             (setf current-lexeme ""))
+           (incf i))
+          
+          ;; Alphanumeric: build alphanumeric lexeme
+          ((alnum-p ch)
+           ;; If we were building a different type, save it
+           (when (and (> (length current-lexeme) 0)
+                      (not (alnum-p (char current-lexeme 0))))
+             (push current-lexeme lexemes)
+             (setf current-lexeme ""))
+           (setf current-lexeme (concatenate 'string current-lexeme (string ch)))
+           (incf i))
+          
+          ;; Symbol characters
+          (t
+           ;; End any alphanumeric lexeme
+           (when (> (length current-lexeme) 0)
+             (push current-lexeme lexemes)
+             (setf current-lexeme ""))
+           
+           ;; Check for two-character symbols
+           (let ((two-char (if (< (+ i 1) len)
+                               (concatenate 'string (string ch) (string (char text (+ i 1))))
+                               nil)))
+             (cond
+               ;; Check for != or ==
+               ((and two-char (or (string= two-char "!=")
+                                  (string= two-char "==")))
+                (push two-char lexemes)
+                (incf i 2))
+               
+               ;; Single character symbol
+               (t
+                (push (string ch) lexemes)
+                (incf i))))))))
+    
+    ;; Don't forget the last lexeme
+    (when (> (length current-lexeme) 0)
+      (push current-lexeme lexemes))
+    
+    ;; Reverse because we built the list backwards
+    (nreverse lexemes)))
+
+;;; Associate a lexeme with its token type
+(defun classify-lexeme (lexeme)
+  "Determine the token type for a given lexeme string."
+  (cond
+    ;; Single-character symbols (check in order)
+    ((string= lexeme "(") :LEFT-PARENTHESIS)
+    ((string= lexeme ")") :RIGHT-PARENTHESIS)
+    ((string= lexeme "{") :LEFT-BRACKET)
+    ((string= lexeme "}") :RIGHT-BRACKET)
+    
+    ;; Keywords
+    ((string= lexeme "while") :WHILE-KEYWORD)
+    ((string= lexeme "return") :RETURN-KEYWORD)
+    
+    ;; Other single-character symbols
+    ((string= lexeme "=") :EQUAL)
+    ((string= lexeme ",") :COMMA)
+    ((string= lexeme ";") :EOL)
+    
+    ;; VARTYPE
+    ((or (string= lexeme "int") (string= lexeme "void")) :VARTYPE)
+    
+    ;; BINOP
+    ((or (string= lexeme "+")
+         (string= lexeme "*")
+         (string= lexeme "!=")
+         (string= lexeme "==")
+         (string= lexeme "%"))
+     :BINOP)
+    
+    ;; NUMBER (all digits)
+    ((all-digits-p lexeme) :NUMBER)
+    
+    ;; Default to IDENTIFIER (matches [a-zA-Z][a-zA-Z0-9]*)
+    (t :IDENTIFIER)))
+
+;;; Convert lexemes to lex structures
+(defun lexemes-to-lex-list (lexemes)
+  "Convert a list of lexeme strings to a list of lex structures."
+  (mapcar (lambda (lexeme)
+            (make-lex :token-type (classify-lexeme lexeme)
+                      :lexeme lexeme))
+          lexemes))
+
+;;; Write lex structures to output file
+(defun write-tokens (lex-list filepath)
+  "Write token-lexeme pairs to output file."
+  (with-open-file (stream filepath :direction :output :if-exists :supersede)
+    (dolist (lex lex-list)
+      (format stream "~A ~A~%"
+              (token-type-to-string (lex-token-type lex))
+              (lex-lexeme lex)))))
+
+;;; Main tokenizer function
+(defun tokenize (input-file output-file)
+  "Main tokenizer: read input file, tokenize, write to output file."
+  (let* ((text (read-file-to-string input-file))
+         (lexemes (tokenize-text text))
+         (lex-list (lexemes-to-lex-list lexemes)))
+    (write-tokens lex-list output-file)))
+
+;;; ============================================================================
+;;; RECOGNIZER IMPLEMENTATION
+;;; ============================================================================
+
+;;; Global variables for parser state
+(defparameter *tokens* nil)        ; List of all tokens
+(defparameter *current-index* 0)   ; Current position in token list
+(defparameter *output-stream* nil) ; Output file stream for error messages
+
+;;; Get the current token
+(defun current-token ()
+  "Return the current token, or NIL if past end."
+  (if (< *current-index* (length *tokens*))
+      (nth *current-index* *tokens*)
+      nil))
+
+;;; Get the token type of current token
+(defun current-token-type ()
+  "Return the token type of the current token, or NIL."
+  (let ((tok (current-token)))
+    (if tok (lex-token-type tok) nil)))
+
+;;; Consume (advance to next token)
+(defun consume ()
+  "Move to the next token."
+  (incf *current-index*))
+
+;;; Check if current token matches expected type
+(defun match (expected-type)
+  "Return T if current token type matches expected type."
+  (eq (current-token-type) expected-type))
+
+;;; Error reporting and termination
+(defun report-error (message)
+  "Write error message to output file and exit."
+  (format *output-stream* "~A~%" message)
+  (close *output-stream*)
+  (exit :code 0))
+
+;;; Expect a specific token type
+(defun expect (token-type grammar-rule)
+  "Consume current token if it matches expected type, otherwise error."
+  (if (match token-type)
+      (consume)
+      (report-error
+       (format nil "Error: In grammar rule ~A, expected token #~A to be ~A but was ~A"
+               grammar-rule
+               (+ *current-index* 1)
+               (token-type-to-string token-type)
+               (if (current-token)
+                   (token-type-to-string (current-token-type))
+                   "EOF")))))
+
+;;; Read tokens from file
+(defun read-tokens-from-file (filepath)
+  "Read token-lexeme pairs from file and return list of lex structures."
+  (with-open-file (stream filepath :direction :input)
+    (loop for line = (read-line stream nil nil)
+          while line
+          for trimmed = (string-trim '(#\Space #\Tab) line)
+          when (> (length trimmed) 0)
+          collect (let* ((space-pos (position #\Space trimmed))
+                         (token-str (subseq trimmed 0 space-pos))
+                         (lexeme (subseq trimmed (+ space-pos 1))))
+                    (make-lex :token-type (string-to-token-type token-str)
+                              :lexeme lexeme)))))
+
+;;; Grammar rule: term --> IDENTIFIER | NUMBER
+(defun parse-term ()
+  "Parse a term non-terminal."
+  (cond
+    ((match :IDENTIFIER) (consume))
+    ((match :NUMBER) (consume))
+    (t (report-error
+        (format nil "Error: In grammar rule term, expected a valid term non-terminal to be present but was not.")))))
+
+;;; Grammar rule: expression --> term {BINOP term} | LEFT_PARENTHESIS expression RIGHT_PARENTHESIS
+(defun parse-expression ()
+  "Parse an expression non-terminal."
+  (cond
+    ;; LEFT_PARENTHESIS expression RIGHT_PARENTHESIS
+    ((match :LEFT-PARENTHESIS)
+     (consume)
+     (parse-expression)
+     (expect :RIGHT-PARENTHESIS "expression"))
+    
+    ;; term {BINOP term}
+    (t
+     (parse-term)
+     ;; Handle zero or more {BINOP term}
+     (loop while (match :BINOP)
+           do (consume)
+              (parse-term)))))
+
+;;; Grammar rule: assignment --> IDENTIFIER EQUAL expression EOL
+(defun parse-assignment ()
+  "Parse an assignment statement."
+  (expect :IDENTIFIER "assignment")
+  (expect :EQUAL "assignment")
+  (parse-expression)
+  (expect :EOL "assignment"))
+
+;;; Grammar rule: return --> RETURN_KEYWORD expression EOL
+(defun parse-return ()
+  "Parse a return statement."
+  (expect :RETURN-KEYWORD "return")
+  (parse-expression)
+  (expect :EOL "return"))
+
+;;; Grammar rule: while-loop --> WHILE_KEYWORD LEFT_PARENTHESIS expression RIGHT_PARENTHESIS body
+(defun parse-while-loop ()
+  "Parse a while loop statement."
+  (expect :WHILE-KEYWORD "while-loop")
+  (expect :LEFT-PARENTHESIS "while-loop")
+  (parse-expression)
+  (expect :RIGHT-PARENTHESIS "while-loop")
+  (parse-body))
+
+;;; Grammar rule: statement --> while-loop | return | assignment
+(defun parse-statement ()
+  "Parse a statement non-terminal."
+  (cond
+    ((match :WHILE-KEYWORD) (parse-while-loop))
+    ((match :RETURN-KEYWORD) (parse-return))
+    ((match :IDENTIFIER) (parse-assignment))
+    (t (report-error
+        (format nil "Error: In grammar rule statement, expected a valid statement non-terminal to be present but was not.")))))
+
+;;; Grammar rule: statement-list --> statement {statement}
+(defun parse-statement-list ()
+  "Parse a statement-list non-terminal."
+  (parse-statement)
+  ;; Handle zero or more additional statements
+  (loop while (or (match :WHILE-KEYWORD)
+                  (match :RETURN-KEYWORD)
+                  (match :IDENTIFIER))
+        do (parse-statement)))
+
+;;; Grammar rule: body --> LEFT_BRACKET [statement-list] RIGHT_BRACKET
+(defun parse-body ()
+  "Parse a body non-terminal."
+  (expect :LEFT-BRACKET "body")
+  ;; Optional statement-list
+  (when (or (match :WHILE-KEYWORD)
+            (match :RETURN-KEYWORD)
+            (match :IDENTIFIER))
+    (parse-statement-list))
+  (expect :RIGHT-BRACKET "body"))
+
+;;; Grammar rule: arg-decl --> VARTYPE IDENTIFIER {COMMA VARTYPE IDENTIFIER}
+(defun parse-arg-decl ()
+  "Parse an arg-decl non-terminal."
+  (expect :VARTYPE "arg-decl")
+  (expect :IDENTIFIER "arg-decl")
+  ;; Handle zero or more {COMMA VARTYPE IDENTIFIER}
+  (loop while (match :COMMA)
+        do (consume)
+           (expect :VARTYPE "arg-decl")
+           (expect :IDENTIFIER "arg-decl")))
+
+;;; Grammar rule: header --> VARTYPE IDENTIFIER LEFT_PARENTHESIS [arg-decl] RIGHT_PARENTHESIS
+(defun parse-header ()
+  "Parse a header non-terminal."
+  (expect :VARTYPE "header")
+  (expect :IDENTIFIER "header")
+  (expect :LEFT-PARENTHESIS "header")
+  ;; Optional arg-decl
+  (when (match :VARTYPE)
+    (parse-arg-decl))
+  (expect :RIGHT-PARENTHESIS "header"))
+
+;;; Grammar rule: function --> header body
+(defun parse-function ()
+  "Parse a function (top-level grammar rule)."
+  (parse-header)
+  (parse-body))
+
+;;; Main recognizer function
+(defun recognize (input-file output-file)
+  "Main recognizer: read tokens, parse, write result."
+  (setf *tokens* (read-tokens-from-file input-file))
+  (setf *current-index* 0)
+  
+  (with-open-file (stream output-file :direction :output :if-exists :supersede)
+    (setf *output-stream* stream)
+    
+    ;; Parse the top-level rule
+    (parse-function)
+    
+    ;; Check if all tokens were consumed
+    (if (< *current-index* (length *tokens*))
+        (report-error
+         (format nil "Error: Only consumed ~A of the ~A given tokens"
+                 *current-index*
+                 (length *tokens*)))
+        ;; Success!
+        (format stream "PARSED!!!~%"))))
+
+;;; ============================================================================
+;;; COMMAND LINE INTERFACE
+;;; ============================================================================
+
+;;; Main entry point - automatically detect mode
+(defun main ()
+  "Main entry point - detects and runs appropriate mode based on script name."
+  (let* ((all-args #+sbcl sb-ext:*posix-argv*
+                   #+ccl ccl:*command-line-argument-list*
+                   #+clisp ext:*args*
+                   #+ecl (ext:command-args)
+                   #-(or sbcl ccl clisp ecl) '())
+         ;; In --script mode, first arg is the Lisp implementation name
+         ;; Rest are the actual script arguments
+         (user-args (cdr all-args)))
+    
+    ;; We need to detect based on *load-truename* which is the actual script file
+    (let ((script-path (or *load-truename* 
+                           (and (> (length user-args) 0) (first user-args))
+                           "")))
+      (cond
+        ;; Check if script path contains "Tokenizer"
+        ((search "Tokenizer" (namestring script-path) :test #'char-equal)
+         (if (>= (length user-args) 2)
+             (tokenize (first user-args) (second user-args))
+             (format t "Tokenizer Usage: sbcl --script Tokenizer.lisp <input-file> <output-file>~%")))
+        
+        ;; Check if script path contains "Recognizer"  
+        ((search "Recognizer" (namestring script-path) :test #'char-equal)
+         (if (>= (length user-args) 2)
+             (recognize (first user-args) (second user-args))
+             (format t "Recognizer Usage: sbcl --script Recognizer.lisp <input-file> <output-file>~%")))
+        
+        ;; Default - show usage
+        (t
+         (format t "Common Lisp Tokenizer and Recognizer~%")
+         (format t "Script: ~A~%" script-path)
+         (format t "Usage:~%")
+         (format t "  Tokenizer: sbcl --script Tokenizer.lisp <input-file> <output-file>~%")
+         (format t "  Recognizer: sbcl --script Recognizer.lisp <input-file> <output-file>~%"))))))
+
+;;; Run main when script is executed directly
+#+sbcl (main)
+#+ccl (main)
+#+clisp (main)
+#+ecl (main)
